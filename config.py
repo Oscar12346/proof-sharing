@@ -15,7 +15,7 @@ class config:
     # General options
     netname = (
         None, 'the network name, the extension can be only .pyt, .tf and .meta')
-    num_tests = (None, 'number of images to test')
+    num_tests = (None, 'number of images to tests')
     relu_transformer = (
         'zonotope', 'Use Standard zonotope transformer or box transformer')
     dataset = (None, 'the dataset, can be either mnist or cifar')
