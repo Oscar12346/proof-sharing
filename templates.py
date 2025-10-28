@@ -18,7 +18,6 @@ logger = logging.getLogger()
 
 
 def binary_search(low, up, tol, isVerified):
-
     isFinished = (up - low) <= tol
     middle = (up + low) * 0.5
 
@@ -47,7 +46,7 @@ def shrinking_one(input, noise, net, label, relu_transformer, up=1.0, low=1E-3, 
             net, relu_transformer=relu_transformer)
         relaxation_net.initialize_from_bounds(lower_bound, upper_bound)
         relaxation_net.forward_pass()
-        isVerified = relaxation_net.calculate_worst_case(label)         # Verifying zonotope through the rest of the network
+        isVerified = relaxation_net.calculate_worst_case(label)  # Verifying zonotope through the rest of the network
 
         isFinished, low, up = binary_search(
             low, up, tol, isVerified)
@@ -55,10 +54,9 @@ def shrinking_one(input, noise, net, label, relu_transformer, up=1.0, low=1E-3, 
         if isVerified:
             relaxations_net_verified = relaxation_net
 
-    isVerified = relaxations_net_verified is not None    
-    
-    return isVerified, relaxations_net_verified
+    isVerified = relaxations_net_verified is not None
 
+    return isVerified, relaxations_net_verified
 
 
 class OnlineTemplates:
@@ -76,7 +74,7 @@ class OnlineTemplates:
 
         input_list, noise_list = self._get_input_and_noise(inputs, method)
 
-        for input, noise in zip(input_list, noise_list):            
+        for input, noise in zip(input_list, noise_list):
             isVerified, relaxation_net = shrinking_one(input, noise, self.net, self.label, self.relu_transformer)
             if not isVerified:
                 continue
@@ -91,20 +89,54 @@ class OnlineTemplates:
                 if self.domain == 'box':
                     # Orange box in Figure 6
                     z = z.to_box()
+                    print("using box")
                 elif self.domain == 'parallelotope':
                     z = z.to_parallelotope()
-                elif self.domain == 'box_cut':
-                    z_box = z.to_box()
-                    # Layer dimensionality
-                    dim = z_box.lb.view(-1).shape[0]
-                    # Build C with NumPy (no torch RNG)
-                    C_np = build_diagonal_cuts_np(dim, mode="auto", max_dirs=64, seed=0)
-                    # Convert to a tensor matching the box’s dtype/device
-                    lb_flat = z_box.lb.view(-1)
-                    C = torch.as_tensor(C_np, dtype=lb_flat.dtype, device=lb_flat.device).contiguous()
 
-                    # Make the cut box
-                    z = z_box.to_box_cut(C)
+                # Box-Cut: first cut, then shrink
+                elif self.domain in ('box_cut1', 'box_cut_1', 'box_cut'):
+                    logger.info("Using box cut 1")
+
+                    # Build C from original zonotope
+                    dim = z.lb.reshape(-1).shape[0]
+                    C_np = build_diagonal_cuts_np(dim, max_dirs=64, seed=0)
+                    C = torch.as_tensor(C_np, dtype=z.lb.dtype, device=z.lb.device).contiguous()
+
+                    # Compute cut thresholds from the rich relaxation (zonotope), not a box
+                    cut_c = support_over(z, C).contiguous()
+
+                    # Use box bounds for efficiency, then to box_cut
+                    z_box = z.to_box()
+                    z_cut = z_box.to_box_cut(C, cut_c=cut_c)
+
+                    isVerified = self._verify_template_once(z_cut, idx_layer)
+                    if isVerified:
+                        self.templates[idx_layer].append(z_cut)
+                    # else: skip storing this template (it’s not safe)
+                    continue
+
+
+                # Box-Cut: first shrink, then cut
+                elif self.domain in ('box_cut2', 'box_cut_2'):
+                    logger.info('Using box cut 2')
+
+                    z_box = z.to_box()
+                    isVerified, z_box_shrunk = self._shrinking_two(z_box, idx_layer)
+                    if not isVerified:
+                        continue
+
+                    dim = z_box_shrunk.lb.reshape(-1).shape[0]
+                    C_np = build_diagonal_cuts_np(dim, mode="auto", max_dirs=64, seed=0)
+                    C = torch.as_tensor(C_np, dtype=z_box_shrunk.lb.dtype, device=z_box_shrunk.lb.device).contiguous()
+
+                    # thresholds from rich set (ok); if you later have a rich-shrunk set, use that
+                    cut_c_rich = support_over(z, C).contiguous()
+
+                    z_cut = z_box_shrunk.to_box_cut(C, cut_c=cut_c_rich)
+
+                    self.templates[idx_layer].append(z_cut)
+                    continue
+
                 else:
                     logger.error(
                         'Unknown template domain: {}'.format(self.domain))
@@ -144,8 +176,8 @@ class OnlineTemplates:
             idx_y = (inputs.shape[3] - patch_size) // 2
 
             noise = torch.zeros_like(inputs)
-            noise[:, :, idx_x:(idx_x+patch_size),
-                  idx_y:(idx_y+patch_size)] = eps
+            noise[:, :, idx_x:(idx_x + patch_size),
+            idx_y:(idx_y + patch_size)] = eps
 
             return [inputs], [noise]
 
@@ -161,8 +193,8 @@ class OnlineTemplates:
             idx_y = (inputs.shape[3] - patch_size) // 2
 
             noise = torch.ones_like(inputs) * eps
-            noise[:, :, idx_x:(idx_x+patch_size),
-                  idx_y:(idx_y+patch_size)] = 0
+            noise[:, :, idx_x:(idx_x + patch_size),
+            idx_y:(idx_y + patch_size)] = 0
 
             return [inputs], [noise]
 
@@ -207,8 +239,8 @@ class OnlineTemplates:
 
             for idx in range(inputs.shape[2]):
                 for idy in range(inputs.shape[3]):
-                    distance = max(abs(idx - center_x)/center_x,
-                                   abs(idy - center_y)/center_y)
+                    distance = max(abs(idx - center_x) / center_x,
+                                   abs(idy - center_y) / center_y)
                     noise[:, :, idx, idy] = (1.0 - distance) * eps
 
             return [inputs], [noise]
@@ -250,7 +282,7 @@ class OnlineTemplates:
 
                     noise.append(n)
 
-            return [inputs] * (num_subpatches**2), noise
+            return [inputs] * (num_subpatches ** 2), noise
 
         elif 'rotation' in method:
             # Number of templates and rotation range given after 'rotation'
@@ -261,7 +293,7 @@ class OnlineTemplates:
                                           for x in method[8:].split('_'))
 
             angle_step = angle_range / num_templates
-            angles = [angle_range - (2*i+1) * angle_step
+            angles = [angle_range - (2 * i + 1) * angle_step
                       for i in range(num_templates)]
             angles = sorted(angles, key=abs)
 
@@ -322,7 +354,7 @@ class OnlineTemplates:
 
             z_net.truncate()
             isVerified = z_net.process_from_layer(
-                self.label, layer+1)
+                self.label, layer + 1)
 
             if isVerified:
                 factor_verified = middle
@@ -337,6 +369,11 @@ class OnlineTemplates:
 
         return isVerified, z
 
+    def _verify_template_once(self, z_template, layer):
+        z_net = Zonotope_Net(self.net, relu_transformer=self.relu_transformer)
+        z_net.relaxation_at_layers = [z_template]
+        return z_net.process_from_layer(self.label, layer + 1)
+
     def submatching(self, z, layer):
         assert layer in self.layers
 
@@ -345,6 +382,29 @@ class OnlineTemplates:
             if isSubmatch:
                 return True
         return False
+
+
+def support_over(z_rich, C: torch.Tensor) -> torch.Tensor:
+    """
+    For each row a in C, return sup_{x in z_rich} a^T x.
+    Use exact zonotope support if available; else box support.
+    """
+    a = C  # (k, d)
+
+    # Exact zonotope support if you have it
+    if hasattr(z_rich, "center") and hasattr(z_rich, "generators"):
+        c = z_rich.center.view(-1)  # (d,)
+        G = z_rich.generators.view(-1, z_rich.num_gen).T  # (m, d)  <-- adapt to your shapes
+        ac = a @ c  # (k,)
+        ag = (a @ G.T).abs().sum(dim=1)  # (k,)
+        return ac + ag
+
+    # Fallback: box support
+    lb = z_rich.lb.view(-1);
+    ub = z_rich.ub.view(-1)
+    a_pos = torch.clamp(a, min=0.0)
+    a_neg = torch.clamp(a, max=0.0)
+    return (a_pos @ ub) + (a_neg @ lb)  # (k,)
 
 
 def build_diagonal_cuts_np(dim: int, mode: str = "auto", max_dirs: int = 64, seed: int = 0) -> np.ndarray:
@@ -372,7 +432,6 @@ def build_diagonal_cuts_np(dim: int, mode: str = "auto", max_dirs: int = 64, see
     norms = np.linalg.norm(C, axis=1, keepdims=True) + 1e-12
     C = C / norms
     return C
-
 
 
 

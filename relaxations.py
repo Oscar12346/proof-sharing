@@ -160,11 +160,17 @@ class Zonotope:
         b = Box_Star(lower_bound, upper_bound)
         return b
 
-    def to_box_cut(self, customized_C):
+    def to_box_cut(self, C, cut_c=None):
         """
-        Convert Box to Box_Cut using cut directions C.
+        COnvert to box cut
         """
-        return Box_Cut(self.a0, self.A, self.lb, self.ub, C=customized_C)
+        # `self` is a Box-like object (has lb/ub)
+        return Box_Cut(a0=getattr(self, "a0", None),
+                       A=getattr(self, "A", None),
+                       lb=self.lb.clone(),
+                       ub=self.ub.clone(),
+                       C=C,
+                       cut_c=cut_c)
 
     def plot(self, color='b'):
         assert self.num_dimensions == 2
@@ -3121,19 +3127,23 @@ class Box_Cut(Box):
     These 'cuts' remove the corners of the box at given orientations C z <= c.
     """
 
-    def __init__(self, a0=None, A=None, lb=None, ub=None, C=None):
+    def __init__(self, a0=None, A=None, lb=None, ub=None, C=None, cut_c=None):
         super().__init__(a0=a0, A=A, lb=lb, ub=ub)
 
         assert C is not None, "Provide cut directions C (k x d)"
 
-        # Compute the corresponding thresholds (offsets)
-        # c_i = C_i^T a0 + sum_j |C_i^T A_j|
+        # Store directions
         lb_flat = self.lb.view(-1)
         self.cut_C = lb_flat.new_tensor(C).contiguous()  # (k, d)
-        ub_flat = self.ub.view(-1)
-        C_pos = torch.clamp(self.cut_C, min=0.0)
-        C_neg = torch.clamp(self.cut_C, max=0.0)
-        self.cut_c = (C_pos @ ub_flat) + (C_neg @ lb_flat)  # (k,)
+
+        if cut_c is None:
+            # Fallback: thresholds computed from THIS object's box (safe but not tighter)
+            ub_flat = self.ub.view(-1)
+            C_pos = torch.clamp(self.cut_C, min=0.0)
+            C_neg = torch.clamp(self.cut_C, max=0.0)
+            cut_c = (C_pos @ ub_flat) + (C_neg @ lb_flat)  # (k,)
+
+        self.cut_c = cut_c.contiguous()
 
         # Register as linear constraints
         self.add_linear_constraints(self.cut_C, self.cut_c)
@@ -3157,6 +3167,8 @@ class Box_Cut(Box):
                 other = other.to_box()
             except Exception:
                 return False
+
+        # logger.info('Using submatching from Box Cut class')
 
         s_lb = other.lb.view(-1)
         s_ub = other.ub.view(-1)
