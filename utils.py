@@ -326,7 +326,8 @@ def load_net_from_acasxu(file_name):
 
 def load_net_from_patch_attacks(file_name):
 
-    load_dict = torch.load(file_name, map_location=torch.device(DEVICE))
+    # load_dict = torch.load(file_name, map_location=torch.device(DEVICE))
+    load_dict = torch.load(file_name, map_location=torch.device(DEVICE), weights_only=False)
     state_dict_load = load_dict['state_dict']
     layers = load_dict['model_layers']
 
