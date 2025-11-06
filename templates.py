@@ -69,8 +69,9 @@ class OnlineTemplates:
         self.domain = domain
         self.templates = {x: [] for x in layers}
         self.relu_transformer = relu_transformer
+        self.number_of_templates = 0
 
-    def create_templates(self, inputs, method):
+    def create_templates(self, inputs, method, max_cuts=64):
 
         input_list, noise_list = self._get_input_and_noise(inputs, method)
 
@@ -89,53 +90,62 @@ class OnlineTemplates:
                 if self.domain == 'box':
                     # Orange box in Figure 6
                     z = z.to_box()
-                    print("using box")
                 elif self.domain == 'parallelotope':
                     z = z.to_parallelotope()
 
-                # Box-Cut: first cut, then shrink
+                # Box-Cut 1: Linear constraints + box (no shrinking)
                 elif self.domain in ('box_cut1', 'box_cut_1', 'box_cut'):
-                    logger.info("Using box cut 1")
-
                     # Build C from original zonotope
                     dim = z.lb.reshape(-1).shape[0]
-                    C_np = build_diagonal_cuts_np(dim, max_dirs=64, seed=0)
+                    C_np = build_diagonal_cuts_np(dim, max_dirs=max_cuts, seed=0)
                     C = torch.as_tensor(C_np, dtype=z.lb.dtype, device=z.lb.device).contiguous()
 
                     # Compute cut thresholds from the rich relaxation (zonotope), not a box
                     cut_c = support_over(z, C).contiguous()
 
-                    # Use box bounds for efficiency, then to box_cut
+                    # Convert to box, then to box_cut using linear constraints cut_c
                     z_box = z.to_box()
                     z_cut = z_box.to_box_cut(C, cut_c=cut_c)
 
                     isVerified = self._verify_template_once(z_cut, idx_layer)
                     if isVerified:
                         self.templates[idx_layer].append(z_cut)
+                        self.number_of_templates += 1
                     # else: skip storing this template (it’s not safe)
                     continue
 
-
-                # Box-Cut: first shrink, then cut
+                # Box-Cut 2: Linear constraints + box (with shrinking)
                 elif self.domain in ('box_cut2', 'box_cut_2'):
-                    logger.info('Using box cut 2')
+                    # Build C from original zonotope
+                    dim = z.lb.reshape(-1).shape[0]
+                    C_np = build_diagonal_cuts_np(dim, max_dirs=max_cuts, seed=0)
+                    C = torch.as_tensor(C_np, dtype=z.lb.dtype, device=z.lb.device).contiguous()
 
+                    # Compute cut thresholds from the rich relaxation (zonotope), not a box
+                    cut_c = support_over(z, C).contiguous()
+
+                    # Convert to box, then to box_cut using linear constraints cut_c
                     z_box = z.to_box()
-                    isVerified, z_box_shrunk = self._shrinking_two(z_box, idx_layer)
-                    if not isVerified:
+
+                    # Shrink box before adding cuts
+                    isVerified, z_box = self._shrinking_two(z_box, idx_layer)
+
+                    if isVerified:
+                        z_cut = z_box.to_box_cut(C, cut_c=cut_c)
+
+                        # # Only for Experiment 5
+                        # cuts_outside_box = check_cuts_outside_box(C, cut_c, z_box)
+
+                        isVerified = self._verify_template_once(z_cut, idx_layer)
+                        if isVerified:
+                            self.templates[idx_layer].append(z_cut)
+
+                            # # Only for Experiment 5
+                            # if not cuts_outside_box:
+                            #     logger.info("Note: for this template, cuts are INSIDE the box")
+
                         continue
 
-                    dim = z_box_shrunk.lb.reshape(-1).shape[0]
-                    C_np = build_diagonal_cuts_np(dim, mode="auto", max_dirs=64, seed=0)
-                    C = torch.as_tensor(C_np, dtype=z_box_shrunk.lb.dtype, device=z_box_shrunk.lb.device).contiguous()
-
-                    # thresholds from rich set (ok); if you later have a rich-shrunk set, use that
-                    cut_c_rich = support_over(z, C).contiguous()
-
-                    z_cut = z_box_shrunk.to_box_cut(C, cut_c=cut_c_rich)
-
-                    self.templates[idx_layer].append(z_cut)
-                    continue
 
                 else:
                     logger.error(
@@ -148,6 +158,9 @@ class OnlineTemplates:
                 if isVerified:
                     # We store a safe region (box abstraction) for each chosen layer
                     self.templates[idx_layer].append(z)
+                    self.number_of_templates += 1
+
+
 
     def _get_input_and_noise(self, inputs, method):
         dataset = 'mnist' if inputs.shape[-1] == 28 else 'cifar'
@@ -393,18 +406,18 @@ def support_over(z_rich, C: torch.Tensor) -> torch.Tensor:
 
     # Exact zonotope support if you have it
     if hasattr(z_rich, "center") and hasattr(z_rich, "generators"):
-        c = z_rich.center.view(-1)  # (d,)
-        G = z_rich.generators.view(-1, z_rich.num_gen).T  # (m, d)  <-- adapt to your shapes
-        ac = a @ c  # (k,)
-        ag = (a @ G.T).abs().sum(dim=1)  # (k,)
+        c = z_rich.center.view(-1)
+        G = z_rich.generators.view(-1, z_rich.num_gen).T
+        ac = a @ c
+        ag = (a @ G.T).abs().sum(dim=1)
         return ac + ag
 
     # Fallback: box support
-    lb = z_rich.lb.view(-1);
+    lb = z_rich.lb.view(-1)
     ub = z_rich.ub.view(-1)
     a_pos = torch.clamp(a, min=0.0)
     a_neg = torch.clamp(a, max=0.0)
-    return (a_pos @ ub) + (a_neg @ lb)  # (k,)
+    return (a_pos @ ub) + (a_neg @ lb)
 
 
 def build_diagonal_cuts_np(dim: int, mode: str = "auto", max_dirs: int = 64, seed: int = 0) -> np.ndarray:
@@ -417,9 +430,12 @@ def build_diagonal_cuts_np(dim: int, mode: str = "auto", max_dirs: int = 64, see
 
     Returns: np.ndarray (k, dim), float32, rows L2-normalized.
     """
+
     if mode == "all" or ((1 << dim) <= max_dirs and mode == "auto"):
         signs = list(itertools.product([-1.0, 1.0], repeat=dim))
         C = np.asarray(signs, dtype=np.float32)
+        # logger.info(f"Using all {C.shape[0]} diagonals.")
+
     else:
         rows = [np.ones(dim, np.float32), -np.ones(dim, np.float32)]
         need = max_dirs - len(rows)
@@ -428,10 +444,27 @@ def build_diagonal_cuts_np(dim: int, mode: str = "auto", max_dirs: int = 64, see
             rnd = rng.choice([-1.0, 1.0], size=(need, dim)).astype(np.float32)
             rows.append(rnd)
         C = np.vstack([r if r.ndim > 1 else r[None, :] for r in rows])
+        # logger.info(f"Using sampled diagonals (max_dirs={max_dirs}), total cuts: {C.shape[0]}")
 
     norms = np.linalg.norm(C, axis=1, keepdims=True) + 1e-12
     C = C / norms
     return C
+
+def check_cuts_outside_box(C, cut_c, z_box, tol=1e-7):
+    """
+    Check if all cuts (a^T x <= cut_c) are outside the given box z_box.
+    """
+    lb = z_box.lb.view(-1)
+    ub = z_box.ub.view(-1)
+
+    # Compute the maximum of a^T x over the box for each cut
+    box_max = (torch.clamp(C, min=0) * ub + torch.clamp(C, max=0) * lb).sum(dim=1)
+    margins = cut_c - box_max
+
+    box_max = (torch.clamp(C, min=0) * ub + torch.clamp(C, max=0) * lb).sum(dim=1)
+    margins = cut_c - box_max  # > 0 means the cut is outside/inactive
+
+    return bool((margins >= -tol).all())
 
 
 

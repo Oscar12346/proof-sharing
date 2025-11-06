@@ -9,7 +9,7 @@ rep=1
 method=l_infinity
 net="7x200_best.pth"
 
-for template_domain in box_cut_1 box
+for template_domain in box_cut_1 box box_cut_2
 do
   for dataset in mnist cifar
   do
@@ -25,27 +25,4 @@ do
   done
 done
 
-  python scripts/summarize_results.py --experiment 1 | tee results/experiment1/summary.txt
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-##!/bin/bash
-#
-#echo ""
-#echo "Small test"
-#echo ""
-#
-#python . --patches --dataset mnist --netname 7x200_best.pth --num_tests 1 --patch_size 2 --template_layers 1 --template_method l_infinity --template_domain box_cut
+python scripts/summarize_results.py --table 1 | tee results/experiment1.txt

@@ -78,6 +78,8 @@ if __name__ == "__main__":
                         default=conf.num_templates[0], help=conf.num_templates[1])
     parser.add_argument('--template_max_eps', type=str2bool,
                         default=False, help='maximize epsilon when creating l-infinity templates')
+    parser.add_argument('--max_dirs', type=int,
+                        default=64)
 
     args = parser.parse_args()
 
@@ -234,6 +236,7 @@ if __name__ == "__main__":
         count_verified = 0                          # total number of imgs verified to be robust
         count_verified_patches = 0                  # total number of patch regions verified
         count_submatched_patches = 0                # total number of patch regions matched to at least one template
+        num_templates = 0
 
         start_time = time()
 
@@ -248,7 +251,8 @@ if __name__ == "__main__":
             # Create set of template(s) based on template method (e.g., l_inf)
             t = templates.OnlineTemplates(
                 net, template_layers, label, args.template_domain, args.relu_transformer)
-            t.create_templates(inputs, args.template_method)
+            t.create_templates(inputs, args.template_method, args.max_dirs)
+            num_templates += t.number_of_templates
 
             # Iterate over all patch locations (each patch location defines an input region)
             num_image_dim = inputs.shape[-1]
@@ -286,6 +290,7 @@ if __name__ == "__main__":
 
                             # Submatch checkpoint (is input region up to this layer contained in template at this layer)
                             isSubmatch = t.submatching(z, idx_layer)
+                            # logger.info("Submatch: {}".format(isSubmatch))
 
                         if isSubmatch:
                             count_verified_patches += 1
@@ -311,6 +316,7 @@ if __name__ == "__main__":
         logger.info('Patches Submatched/Verified: {:.3f}/{:.3f}'.format(
             count_submatched_patches / count_patches_total,
             count_verified_patches / count_patches_total))
+        logger.info('Number of Templates Verified: {}'.format(num_templates))
         logger.info('Time spent: {:.2f}'.format(time() - start_time))
 
     # Verify against Patch Perturbations with additional timing/logging

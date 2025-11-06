@@ -135,7 +135,6 @@ class Zonotope:
             self._d = constraints[1]
 
     def submatching(self, other):
-
         if (self.lb > other.lb).any() or (self.ub < other.ub).any():
             return False
 
@@ -3160,7 +3159,7 @@ class Box_Cut(Box):
           1) Box inclusion: self.lb <= other.lb and other.ub <= self.ub
           2) Cuts satisfied: max_{z in other} (cut_C z) <= cut_c
         """
-
+        # logging.info("Checking submatch for Box-Cut")
         # If 'other' isn't a Box, reduce to Box hull first
         if not hasattr(other, "lb") or not hasattr(other, "ub"):
             try:
